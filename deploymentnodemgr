@@ -1,0 +1,337 @@
+/****************************************************************
+ File Name   : serverdeploymentManager-node.js
+ Dependencies  : node JS express
+ Description   : To render the server deployment application 
+ Contact       : rasmi.nayak.up9m@statefarm.com
+****************************************************************/
+
+var     express = require('express'),
+        fs = require("fs"),
+        os=require("os"),
+        app = express(),
+        spawn = require('child_process').spawn,
+	cors = require('cors'),
+	formidable = require('formidable'),
+        qmbuildmanager = express.Router();
+            
+var appConfig = require('./public/config/config.json');
+
+var options = { timeout: 15000, killSignal: 'SIGKILL' }; 
+
+var logFile = fs.createWriteStream('applicationDeployment.log', {flags: 'a'});
+
+app.use(express.static('public'));
+app.use(cors());
+
+if(appConfig.port){
+    app.use('/qmbuildmanager', qmbuildmanager);
+    	var server = app.listen(appConfig.port, function () {
+        console.log(server.address());
+       	var host = server.address().address
+       	var port = server.address().port
+       	console.log("Server Deployment App is listening at http://"+host+":"+port);
+    });
+}else{
+    console.log("ServerDeploymentApp - An exception occurred while reading application config file");
+}
+
+qmbuildmanager.get('/', function(req, res){
+  res.sendFile( __dirname + "/public/" + "serverDeploymentManager.html" );
+});
+
+qmbuildmanager.get('/getUserName', function (req, res) {
+    var platform=os.platform();
+    var command="";
+    var username="";
+    if( platform == "linux"){
+       command="who";
+    }else{
+	command ="whoami";
+    }
+    workerProcess=spawn(command);
+    workerProcess.stdout.on('data',function(data){
+	userName=data.toString().split(" ")[0];
+	res.send('{"userName":"'+userName+'"}');
+    });
+});
+
+qmbuildmanager.get('/getConfig', function (req, res) {
+   fd=fs.readFile(appConfig.deplymentPlanConfig, function(err, data) {
+   if (err) {
+      console.error(err);
+       res.send('{"error":"Hello"}');
+   }
+  console.log("File opened successfully!"); 
+  res.send(data);
+   })
+})
+qmbuildmanager.get('/updateServerEntry', function (req, res) {
+    var oldServerName=req.query.oldServerName;
+    var oldServerType=req.query.oldServerType;
+    var newServerName=req.query.newServerName;
+    var newServerType=req.query.newServerType;
+   
+    logger("Info","Updating deployment plan oldServerName"+oldServerName+" oldServerType "+oldServerType +"newServerName"+
+		newServerName+" newServerType "+newServerType +" user Name "+userName);
+ 
+    fs.readFile(appConfig.deplymentPlanConfig, function(err, data) {
+        if (err) {
+          console.error(err);
+           res.send('{"error":"Hello"}');
+        }
+        obj = JSON.parse(data);
+        for(var i=0;i<obj.servers.length ;i++){
+             if(obj.servers[i].name.match(oldServerName) && obj.servers[i].type.match(oldServerType)){
+                console.log(obj.servers[i].name +" "+newServerName +" "+newServerType +" "+ obj.servers[i].type);
+                obj.servers[i]["name"]=newServerName;
+                obj.servers[i]["type"]=newServerType;
+             }
+        }
+        fs.writeFile(appConfig.deplymentPlanConfig, JSON.stringify(obj),function(err, data) {
+           if (err) {
+              console.error(err);
+               res.send('{"error":"Hello"}');
+           }else{
+               res.send('{"status":"Success"}');
+           }
+        });
+    })
+})
+qmbuildmanager.get('/deleteServerEntry', function (req, res) {
+    serverName=req.query.name;
+    appName=req.query.type;
+
+    logger("Info","Un-deploying appName "+appName+" from server "+serverName +" user Name "+userName); 
+    workerProcess=spawn('python',["/home/wbtchadm/qmServerDeploymentApp/qmServerDeployManager-stub.py",'-f' ,
+			'undeployQMApp','--server',serverName,'-a',appName,'-w','test'],{detached: true});
+
+    workerProcess.stdout.on('data',function(data){
+             console.log(data.toString());
+	     removingServerEntry(serverName,appName,res);
+    });
+    setTimeout(function(){ workerProcess.kill()}, 25000);
+
+})
+
+qmbuildmanager.get('/addServerEntry', function (req, res) {
+    name=req.query.name;
+    type=req.query.type;
+    userName=req.query.userName;
+
+    var obj1=[];
+    var obj2={};
+    
+    logger("Info","Adding new application server entry into deployment plan list");
+    logger("Info","server name "+name+ " type "+type +" user Name "+userName);
+
+    fs.readFile(appConfig.deplymentPlanConfig, function(err, data) {
+        if (err) {
+          console.error(err);
+           res.send('{"error":"Error while reading deplymentPlanConfig"}');
+           logger("Error","Error while reading deplymentPlanConfig for server name "+name+ " type "+type );
+        }
+        obj = JSON.parse(data);
+        obj["servers"].push({"status":0,"version":"","type":type,"name":name});
+        console.log(JSON.stringify(obj));
+        fs.writeFile(appConfig.deplymentPlanConfig, JSON.stringify(obj),function(err, data) {
+           if (err) {
+              console.error(err);
+              res.send('{"error":"Error while writing deplymentPlanConfig"}');
+	      logger("Error","Error while writing deplymentPlanConfig for server name "+name+ " type "+type );
+           }else{
+	       logger("Info","Successfully added server name "+name+ " type "+type +" by user Name "+userName);
+               res.send('{"status":"Success"}');
+           }
+        });
+    })
+})
+qmbuildmanager.get('/getWarFileList', function (req, res) {
+    fs.readdir(appConfig.deplymentWarFilePath, function(err, data) {
+        res.send(JSON.stringify(data));
+    });
+});
+
+
+qmbuildmanager.get('/testServerSSHKey', function (req, res) {
+        var serverName=req.query.serverName;
+        workerProcess=spawn('python',["/home/wbtchadm/qmServerDeploymentApp/qmServerDeployManager-stub.py",'-f' ,'testSSHKey','--server' ,serverName],{detached: true});
+        workerProcess.stdout.on('data',function(data){
+	     console.log(data.toString());
+	     res.send(data.toString());
+        });
+	workerProcess.on('close', function (code, signal) {
+  	//	console.log('child process terminated due to receipt of signal '+signal);
+	});
+
+	setTimeout(function(){ workerProcess.kill('SIGHUP')}, 500);
+});
+
+qmbuildmanager.get('/controlTomcat', function (req, res) {
+        var serverName=req.query.serverName;
+        var serverType=req.query.serverType;
+        var action=req.query.action;
+	userName=req.query.userName;
+
+	logger("Info",action+" server "+serverName+" by user name "+userName);
+
+        workerProcess=spawn('python',["/home/wbtchadm/qmServerDeploymentApp/qmServerDeployManager-stub.py",'-f','controlTomcat','-s',serverName,'-c',action],{detached: true});
+        workerProcess.stdout.on('data',function(data){
+             console.log(data.toString());
+             res.send(data.toString());
+        });
+
+	setTimeout(function(){workerProcess.kill('SIGHUP');}, 10000);
+});
+
+qmbuildmanager.get('/controlApache', function (req, res) {
+        var serverName=req.query.serverName;
+        var serverType=req.query.serverType;
+        var action=req.query.action;
+        userName=req.query.userName;
+
+        logger("Info",action+" server "+serverName+" by user name "+userName);
+
+        workerProcess=spawn('python',["/home/wbtchadm/qmServerDeploymentApp/qmServerDeployManager-stub.py",'-f','controlApache','-s',serverName,'-c',action],{detached: true});
+        workerProcess.stdout.on('data',function(data){
+             console.log(data.toString());
+             res.send(data.toString());
+        });
+
+        setTimeout(function(){workerProcess.kill('SIGHUP');}, 10000);
+});
+
+qmbuildmanager.get('/sessionManagerConfig', function (req, res) {
+    workerProcess=spawn('python',["/home/wbtchadm/qmServerDeploymentApp/qmServerDeployManager-stub.py",'-f','getSessionManagerConfig','-u',appConfig.sessionManagerConfigUrl ],{detached: true});
+    workerProcess.stdout.on('data',function(data){
+       console.log(data.toString());
+       res.send(data.toString());
+    });
+});
+
+qmbuildmanager.get('/updateEnvironmentFile', function (req, res) {
+       console.log("calling update Environment.......");
+       var selectedServerName=req.query.selectedServerName;
+       var environmentData=req.query.environmentData;
+       userName=req.query.userName;
+	   
+       logger("Info","Updating tomcat environment file on server "+selectedServerName +" by user "+userName);
+
+        workerProcess=spawn('python',["/home/wbtchadm/qmServerDeploymentApp/qmServerDeployManager-stub.py",'-f','updateEnvironmentFile',
+				'-s',selectedServerName, 'd', environmentData],{detached: true});
+        workerProcess.stdout.on('data',function(data){
+		console.log(data.toString());
+             	res.send(data.toString());
+        });
+	setTimeout(function(){ workerProcess.kill()}, 20000);
+});
+
+qmbuildmanager.get('/deployWarFile', function (req, res) {
+       console.log("Comes Here");
+       var serverNames=req.query.serverNames;
+       var serverType=req.query.serverType;
+       var warFileName=req.query.warFileNames;
+       
+       userName=req.query.userName;
+       logger("Info","Deploying war file "+warFileName+" server "+serverNames +" type "+serverType +" by user "+userName);
+
+        workerProcess=spawn('python',["/home/wbtchadm/qmServerDeploymentApp/qmServerDeployManager-stub.py",'-f','deployQMApp',
+				'-s',serverNames,'-a',serverType,'-w',warFileName],{detached: true});
+        workerProcess.stdout.on('data',function(data){
+		console.log(data.toString());
+             	res.send(data.toString());
+        });
+	setTimeout(function(){ workerProcess.kill()}, 20000);
+});
+
+qmbuildmanager.post('/fileupload', function (req, res) {
+
+    var form = new formidable.IncomingForm();
+    form.parse(req, function (err, fields, files) {
+		var oldpath = files.filetoupload.path;
+		var newpath = '/tmp/' + files.filetoupload.name;
+		fs.rename(oldpath, newpath, function (err) {
+			console.log("File Uploaded successfully....");
+			if (err) throw err;
+			res.sendFile( __dirname + "/public/" + "serverDeploymentManager.html" );
+		});
+    });
+});
+
+qmbuildmanager.get('/getAuthUserNames', function (req, res) {
+    var userName=req.query.userName;
+    fs.readFile(appConfig.authUsersConfig, function(err,data) {
+	if (err) {
+          console.error(err);
+          res.send('{"error":"unable open user config file"}');
+        }else{
+	 logger("Info"," Authentication request from user "+userName );
+         res.send(data.toString());
+	}
+    });	 
+ });
+ 
+ qmbuildmanager.get('/admViewLog', function (req, res) {
+	var fileContent=fs.readFileSync(appConfig.logFile).toString().split("\n");
+        res.send(JSON.stringify(fileContent)); 
+ });
+
+
+app.get('*', function(req, res){
+  res.status(400).sendFile( __dirname + "/public/" + "error.html" );
+});
+
+
+function removingServerEntry(name,type,res){
+    var obj1=[];
+    var obj2={};
+    fs.readFile(appConfig.deplymentPlanConfig, function(err, data) {
+        if (err) {
+          console.error(err);
+           res.send('{"error":"Hello"}');
+        }
+        obj = JSON.parse(data);
+        for(var i=0;i<obj.servers.length ;i++){
+            console.log(obj.servers[i].name +" "+name +" "+type +" "+ obj.servers[i].type);
+             if(!obj.servers[i].name.match(name) || !obj.servers[i].type.match(type)){
+                obj1.push(obj.servers[i]);
+             }
+        }
+        obj2["servers"]=obj1;
+        console.log(JSON.stringify(obj2));
+        fs.writeFile(appConfig.deplymentPlanConfig, JSON.stringify(obj2),function(err, data) {
+           if (err) {
+              console.error(err);
+               res.send('{"error":"error while undelployiong app..."}');
+           }else{
+               res.send('{"status":1}');
+           }
+        });
+    })    
+}
+
+function logger(type,msg){
+	var timeStamp=getFormattedDate();
+	var message;
+	if(type !== ""){
+		message=timeStamp+" - "+ " applicationDeployment "+" - "+type+" - "+msg;
+	}else{
+		switch(msg){
+			case (msg.match(/error/)):
+				message =timeStamp+" - "+ " applicationDeployment "+" - "+"Error"+" - "+msg;
+				break;
+			case (msg.match(/debug/)):
+				message =timeStamp+" - "+ " applicationDeployment "+" - "+"Debug"+" - "+msg;
+				break;
+			default:
+				message =timeStamp+" - "+ " applicationDeployment "+" - "+"Info"+" - "+msg;
+		}
+	}
+	logFile.write(message+"\r\n");
+}
+
+function getFormattedDate() {
+    var date = new Date();
+    var str = date.getFullYear() + "-" + (date.getMonth() + 1) + "-" + date.getDate() + " " +  date.getHours() + ":" + date.getMinutes() + ":" + date.getSeconds();
+
+    return str;
+}
